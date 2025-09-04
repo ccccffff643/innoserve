@@ -31,7 +31,9 @@ export default function TabsLayout() {
           ),
         }}
       />
-
+      
+      {/* 登入頁：對應 app/(tabs)/login.tsx（一定要有這個檔案） */}
+      <Tabs.Screen name="login" options={{ title: '登入' }} /> 
 
       {/* 若你有 Explore 也可加上：
       <Tabs.Screen name="explore" options={{ title: '探索' }} />
