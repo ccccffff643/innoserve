@@ -14,10 +14,21 @@ import {
 } from 'react-native';
 import { openDirections } from '../../lib/nav';
 import { MOCK_PROPERTIES, Property } from '../data/properties';
-import { Comment, commentsKey, setAverageRatingFromComments } from '../lib/comments';
 import { getJSON, setJSON } from '../lib/storage';
+import { getMyId } from '../lib/user'; // ← 新增：取得本機使用者ID
+
+// === 型別：新增 authorId（舊資料沒有也OK） ===
+type Comment = {
+  id: string;
+  user: string;
+  rating: number; // 1~5
+  text: string;
+  createdAt: number;
+  authorId?: string; // ← 新增
+};
 
 const FAVS_KEY = 'favs:v1';
+const commentsKey = (pid: string) => `comments:${pid}`;
 
 export default function PropertyDetails() {
   const router = useRouter();
@@ -28,14 +39,19 @@ export default function PropertyDetails() {
     [id]
   );
 
+  const [myId, setMyId] = useState<string>('');               // ← 新增：本機使用者ID
   const [favs, setFavs] = useState<string[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
   const [user, setUser] = useState('訪客');
   const [rating, setRating] = useState(5);
   const [text, setText] = useState('');
 
+  // 讀取本機ID與資料
   useEffect(() => {
     (async () => {
+      const uid = await getMyId();
+      setMyId(uid);
+
       const fs = await getJSON<string[]>(FAVS_KEY, []);
       setFavs(fs);
       if (id) {
@@ -64,6 +80,21 @@ export default function PropertyDetails() {
     Alert.alert(isFav ? '已取消收藏' : '已加入收藏');
   };
 
+  // === 新增：刪除評論（只有作者可刪） ===
+  const confirmDelete = (cid: string) => {
+    Alert.alert('刪除評論', '確定要刪除此則評論嗎？', [
+      { text: '取消' },
+      {
+        text: '刪除', style: 'destructive',
+        onPress: async () => {
+          const next = comments.filter(c => c.id !== cid);
+          setComments(next);
+          await setJSON(commentsKey(property.id), next);
+        }
+      },
+    ]);
+  };
+
   const submitComment = async () => {
     if (!text.trim()) {
       Alert.alert('請輸入評論內容');
@@ -75,16 +106,13 @@ export default function PropertyDetails() {
       rating,
       text: text.trim(),
       createdAt: Date.now(),
+      authorId: myId, // ← 新增：帶上作者ID
     };
     const next = [c, ...comments];
     setComments(next);
     setText('');
     setRating(5);
-
-    // 1) 寫入評論清單
     await setJSON(commentsKey(property.id), next);
-    // 2) 立刻依「最新評論陣列」寫入平均分數快取
-    await setAverageRatingFromComments(property.id, next);
   };
 
   const avgFromComments =
@@ -96,6 +124,7 @@ export default function PropertyDetails() {
 
   const displayAvg = avgFromComments ?? property.avgRating ?? 0;
 
+  // 導航：點擊後直接開地圖 App 導航到此物件座標
   const handleNavigate = () => {
     if (!property) return;
     openDirections({ address: property.address, label: property.name }, { preferred: 'google' });
@@ -121,7 +150,7 @@ export default function PropertyDetails() {
         </View>
       </View>
 
-      {/* 行動按鈕列：導航 + 收藏 */}
+      {/* 行動按鈕：導航 + 收藏 */}
       <View style={styles.actionRow}>
         <Pressable onPress={handleNavigate} style={[styles.actionBtn, { backgroundColor: '#0ea5e9' }]}>
           <Ionicons name="navigate" size={18} color="#fff" />
@@ -130,7 +159,10 @@ export default function PropertyDetails() {
 
         <Pressable
           onPress={toggleFav}
-          style={[styles.actionBtn, { backgroundColor: isFav ? '#ef4444' : '#111' }]}
+          style={[
+            styles.actionBtn,
+            { backgroundColor: isFav ? '#ef4444' : '#111' },
+          ]}
         >
           <Ionicons name={isFav ? 'heart' : 'heart-outline'} size={18} color="#fff" />
           <Text style={styles.actionText}>{isFav ? '已收藏' : '收藏'}</Text>
@@ -150,13 +182,20 @@ export default function PropertyDetails() {
         <Text style={styles.cardTitle}>新增評論</Text>
 
         <Text style={styles.label}>暱稱</Text>
-        <TextInput value={user} onChangeText={setUser} placeholder="你的暱稱" style={styles.input} />
+        <TextInput
+          value={user}
+          onChangeText={setUser}
+          placeholder="你的暱稱"
+          style={styles.input}
+        />
 
         <Text style={styles.label}>評分（點選星星）</Text>
         <View style={{ flexDirection: 'row', marginBottom: 8 }}>
           {[1, 2, 3, 4, 5].map((v) => (
             <Pressable key={v} onPress={() => setRating(v)}>
-              <Text style={{ fontSize: 26, marginRight: 6 }}>{v <= rating ? '⭐' : '☆'}</Text>
+              <Text style={{ fontSize: 26, marginRight: 6 }}>
+                {v <= rating ? '⭐' : '☆'}
+              </Text>
             </Pressable>
           ))}
         </View>
@@ -180,15 +219,31 @@ export default function PropertyDetails() {
         {comments.length === 0 ? (
           <Text style={styles.muted}>尚無評論</Text>
         ) : (
-          comments.map((c) => (
-            <View key={c.id} style={{ marginBottom: 12 }}>
-              <Text style={{ fontWeight: '700' }}>
-                {c.user}　{Array.from({ length: c.rating }).map(() => '⭐').join('')}
-              </Text>
-              <Text style={styles.mutedSmall}>{new Date(c.createdAt).toLocaleString()}</Text>
-              <Text style={{ lineHeight: 20 }}>{c.text}</Text>
-            </View>
-          ))
+          comments.map((c) => {
+            const mine = c.authorId && c.authorId === myId;
+            return (
+              <View key={c.id} style={{ marginBottom: 12 }}>
+                {/* 標題列：暱稱 + 星 + 刪除 */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Text style={{ fontWeight: '700' }}>
+                    {c.user}{'　'}
+                    {Array.from({ length: c.rating }).map(() => '⭐').join('')}
+                  </Text>
+
+                  {mine && (
+                    <Pressable onPress={() => confirmDelete(c.id)} hitSlop={6} style={{ padding: 4 }}>
+                      <Ionicons name="trash-outline" size={18} color="#ef4444" />
+                    </Pressable>
+                  )}
+                </View>
+
+                <Text style={styles.mutedSmall}>
+                  {new Date(c.createdAt).toLocaleString()}
+                </Text>
+                <Text style={{ lineHeight: 20 }}>{c.text}</Text>
+              </View>
+            );
+          })
         )}
       </View>
     </ScrollView>
@@ -208,6 +263,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: '800' },
   muted: { color: '#666', marginTop: 3 },
   mutedSmall: { color: '#888', fontSize: 12, marginBottom: 4 },
+
   actionRow: {
     paddingHorizontal: 16,
     marginTop: 4,
@@ -222,7 +278,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  actionText: { color: '#fff', fontWeight: '700', fontSize: 16, marginLeft: 8 },
+  actionText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 16,
+    marginLeft: 8,
+  },
+
   card: {
     backgroundColor: 'white',
     marginHorizontal: 16,
