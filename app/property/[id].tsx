@@ -15,16 +15,16 @@ import {
 import { openDirections } from '../../lib/nav';
 import { MOCK_PROPERTIES, Property } from '../data/properties';
 import { getJSON, setJSON } from '../lib/storage';
-import { getMyId } from '../lib/user'; // ← 新增：取得本機使用者ID
+import { getMyId } from '../lib/user';
 
-// === 型別：新增 authorId（舊資料沒有也OK） ===
+// === 型別：新增 authorId（舊資料沒有也 OK） ===
 type Comment = {
   id: string;
   user: string;
   rating: number; // 1~5
   text: string;
   createdAt: number;
-  authorId?: string; // ← 新增
+  authorId?: string; // ← 新增，用於辨識留言作者
 };
 
 const FAVS_KEY = 'favs:v1';
@@ -39,14 +39,14 @@ export default function PropertyDetails() {
     [id]
   );
 
-  const [myId, setMyId] = useState<string>('');               // ← 新增：本機使用者ID
+  const [myId, setMyId] = useState<string>(''); // 本機使用者 ID
   const [favs, setFavs] = useState<string[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
   const [user, setUser] = useState('訪客');
   const [rating, setRating] = useState(5);
   const [text, setText] = useState('');
 
-  // 讀取本機ID與資料
+  // 讀取本機 ID、收藏與留言；同時「升級」舊留言：沒有 authorId 就補成我的 ID
   useEffect(() => {
     (async () => {
       const uid = await getMyId();
@@ -54,8 +54,16 @@ export default function PropertyDetails() {
 
       const fs = await getJSON<string[]>(FAVS_KEY, []);
       setFavs(fs);
+
       if (id) {
-        setComments(await getJSON<Comment[]>(commentsKey(id), []));
+        const list = await getJSON<Comment[]>(commentsKey(id), []);
+        // 補上 authorId（僅補沒有 authorId 的舊資料）
+        const upgraded = list.map((c) => (c.authorId ? c : { ...c, authorId: uid }));
+        // 有升級才回寫一次，避免不必要的 IO
+        if (list.some((c) => !c.authorId)) {
+          await setJSON(commentsKey(id), upgraded);
+        }
+        setComments(upgraded);
       }
     })();
   }, [id]);
@@ -80,21 +88,23 @@ export default function PropertyDetails() {
     Alert.alert(isFav ? '已取消收藏' : '已加入收藏');
   };
 
-  // === 新增：刪除評論（只有作者可刪） ===
+  // 刪除評論（只有作者可刪）
   const confirmDelete = (cid: string) => {
     Alert.alert('刪除評論', '確定要刪除此則評論嗎？', [
       { text: '取消' },
       {
-        text: '刪除', style: 'destructive',
+        text: '刪除',
+        style: 'destructive',
         onPress: async () => {
-          const next = comments.filter(c => c.id !== cid);
+          const next = comments.filter((c) => c.id !== cid);
           setComments(next);
           await setJSON(commentsKey(property.id), next);
-        }
+        },
       },
     ]);
   };
 
+  // 新增評論：寫入 authorId
   const submitComment = async () => {
     if (!text.trim()) {
       Alert.alert('請輸入評論內容');
@@ -106,7 +116,7 @@ export default function PropertyDetails() {
       rating,
       text: text.trim(),
       createdAt: Date.now(),
-      authorId: myId, // ← 新增：帶上作者ID
+      authorId: myId,
     };
     const next = [c, ...comments];
     setComments(next);
@@ -115,6 +125,7 @@ export default function PropertyDetails() {
     await setJSON(commentsKey(property.id), next);
   };
 
+  // 平均評分（以目前留言計算）
   const avgFromComments =
     comments.length === 0
       ? undefined
@@ -124,7 +135,7 @@ export default function PropertyDetails() {
 
   const displayAvg = avgFromComments ?? property.avgRating ?? 0;
 
-  // 導航：點擊後直接開地圖 App 導航到此物件座標
+  // 導航：點擊後開地圖 App
   const handleNavigate = () => {
     if (!property) return;
     openDirections({ address: property.address, label: property.name }, { preferred: 'google' });
@@ -159,10 +170,7 @@ export default function PropertyDetails() {
 
         <Pressable
           onPress={toggleFav}
-          style={[
-            styles.actionBtn,
-            { backgroundColor: isFav ? '#ef4444' : '#111' },
-          ]}
+          style={[styles.actionBtn, { backgroundColor: isFav ? '#ef4444' : '#111' }]}
         >
           <Ionicons name={isFav ? 'heart' : 'heart-outline'} size={18} color="#fff" />
           <Text style={styles.actionText}>{isFav ? '已收藏' : '收藏'}</Text>
@@ -193,9 +201,7 @@ export default function PropertyDetails() {
         <View style={{ flexDirection: 'row', marginBottom: 8 }}>
           {[1, 2, 3, 4, 5].map((v) => (
             <Pressable key={v} onPress={() => setRating(v)}>
-              <Text style={{ fontSize: 26, marginRight: 6 }}>
-                {v <= rating ? '⭐' : '☆'}
-              </Text>
+              <Text style={{ fontSize: 26, marginRight: 6 }}>{v <= rating ? '⭐' : '☆'}</Text>
             </Pressable>
           ))}
         </View>
@@ -223,11 +229,9 @@ export default function PropertyDetails() {
             const mine = c.authorId && c.authorId === myId;
             return (
               <View key={c.id} style={{ marginBottom: 12 }}>
-                {/* 標題列：暱稱 + 星 + 刪除 */}
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                   <Text style={{ fontWeight: '700' }}>
-                    {c.user}{'　'}
-                    {Array.from({ length: c.rating }).map(() => '⭐').join('')}
+                    {c.user}　{Array.from({ length: c.rating }).map(() => '⭐').join('')}
                   </Text>
 
                   {mine && (
@@ -237,9 +241,7 @@ export default function PropertyDetails() {
                   )}
                 </View>
 
-                <Text style={styles.mutedSmall}>
-                  {new Date(c.createdAt).toLocaleString()}
-                </Text>
+                <Text style={styles.mutedSmall}>{new Date(c.createdAt).toLocaleString()}</Text>
                 <Text style={{ lineHeight: 20 }}>{c.text}</Text>
               </View>
             );
