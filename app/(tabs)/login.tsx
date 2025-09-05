@@ -19,12 +19,16 @@ import {
   getCurrentUser,
   isAdmin,
   register,
-  resetPassword, // ← resetPasswordWithOtp(email, otp, newPassword)
+  resetPassword, // resetPassword(email, otp, newPassword)
   sendResetOtp,
   signIn,
   signOut,
   type AuthUser,
 } from '../lib/auth';
+
+// ← 新增：載入要匯入的 JSON（放對路徑見下方注意事項）
+import rawP2 from '../data/import/comments_p2.json';
+import { importGoogleJson } from '../lib/comments';
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 type Mode = 'login' | 'signup' | 'reset';
@@ -96,12 +100,8 @@ export default function LoginScreen() {
     if (busy) return false;
     if (!emailValid) return false;
 
-    if (mode === 'login') {
-      return pwdValid;
-    }
-    if (mode === 'signup') {
-      return pwdValid && pwd2Valid;
-    }
+    if (mode === 'login')   return pwdValid;
+    if (mode === 'signup')  return pwdValid && pwd2Valid;
     // reset: 需要 OTP + 新密碼兩次
     return otpValid && newPwdValid && newPwd2Valid;
   }, [busy, emailValid, pwdValid, pwd2Valid, mode, otpValid, newPwdValid, newPwd2Valid]);
@@ -238,6 +238,23 @@ export default function LoginScreen() {
               <Text style={styles.row}>目前帳號：{user.email}</Text>
               <Text style={styles.row}>身分：{isAdmin(user) ? '管理員' : '一般使用者'}</Text>
 
+              {/* 管理員專用：匯入 Google 評論（p2：元智大富翁） */}
+              {isAdmin(user) && (
+                <Pressable
+                  style={[styles.btn, { backgroundColor: '#10b981' }]}
+                  onPress={async () => {
+                    try {
+                      const res = await importGoogleJson('p2', rawP2 as any[]);
+                      Alert.alert('匯入完成', `新增 ${res.added} 筆，總筆數：${res.total}`);
+                    } catch (e: any) {
+                      Alert.alert('匯入失敗', e?.message ?? '請稍後再試');
+                    }
+                  }}
+                >
+                  <Text style={styles.btnText}>匯入「元智大富翁」Google評論</Text>
+                </Pressable>
+              )}
+
               <Pressable style={[styles.btn, { backgroundColor: '#ef4444' }]} onPress={handleLogout}>
                 <Text style={styles.btnText}>登出</Text>
               </Pressable>
@@ -335,10 +352,7 @@ export default function LoginScreen() {
                     </View>
                     <Pressable
                       disabled={busy || !emailValid || cooldown > 0}
-                      style={[
-                        styles.smallBtn,
-                        (busy || !emailValid || cooldown > 0) && { opacity: 0.6 },
-                      ]}
+                      style={[styles.smallBtn, (busy || !emailValid || cooldown > 0) && { opacity: 0.6 }]}
                       onPress={handleSendOtp}
                     >
                       <Text style={styles.smallBtnText}>
