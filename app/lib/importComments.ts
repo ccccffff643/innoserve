@@ -1,193 +1,141 @@
 // app/lib/importComments.ts
-// 零相依版：支援 JSON 與 CSV 匯入評論，不需要 papaparse
-
-import {
-    Comment,
-    commentsKey,
-    setAverageRatingFromComments,
-} from './comments';
+import { MOCK_PROPERTIES } from '../data/properties';
+import { commentsKey, setAverageRatingFromComments, type Comment } from './comments';
 import { getJSON, setJSON } from './storage';
 
-type RawComment = {
-  // 你可能的欄位（Google/Dcard/自備 CSV）
-  user?: string;
-  reviewer?: string;
-  author?: string;
-
-  text?: string;
-  content?: string;
-  comment?: string;
-
-  rating?: number | string; // 1~5
-
-  createdAt?: number | string; // epoch 或日期字串
-  date?: string;
-  review_date?: string;
-  review_time?: string; // 例如「3 個月前」
+// 原始檔可接受的欄位（會做寬鬆對應）
+export type RawComment = {
+  // 使用者/作者
+  user?: string; reviewer?: string; author?: string; name?: string;
+  // 文字
+  text?: string; content?: string; comment?: string; review?: string; body?: string;
+  // 評分
+  rating?: number | string; score?: number | string; stars?: number | string;
+  // 時間
+  createdAt?: number | string; date?: string; review_date?: string; time?: string;
+  // 直接指定對應物件（可選）
+  propertyId?: string; pid?: string;
 };
 
-// ====== 匯入入口（JSON 陣列）==================================================
-export async function importCommentsFromJSON(
-  pid: string,
-  rows: RawComment[],
-  opts?: { dedupe?: boolean; merge?: boolean }
-): Promise<number> {
-  const key = commentsKey(pid);
-  const existing = await getJSON<Comment[]>(key, []);
+// ---------- 工具：名稱比對 / 檔名解析 ----------
+const sanitize = (s: string) => (s || '')
+  .toLowerCase()
+  .replace(/\s+/g, '')
+  .replace(/[^\p{Letter}\p{Number}]/gu, ''); // 移除符號
 
-  const dedupe = opts?.dedupe ?? true;
-  const seen = new Set(
-    existing.map((c) => `${(c.user || '').trim()}|${c.text.trim()}`)
-  );
-
-  let added = 0;
-  const out = [...existing];
-
-  rows.forEach((r, i) => {
-    const norm = normalize(r, pid, i);
-    if (!norm.text) return;
-
-    if (dedupe) {
-      const sig = `${norm.user}|${norm.text}`;
-      if (seen.has(sig)) return;
-      seen.add(sig);
-    }
-
-    out.unshift(norm); // 新資料放前面
-    added++;
-  });
-
-  await setJSON(key, out);
-  await setAverageRatingFromComments(pid, out);
-  return added;
+export function inferPidFromFilename(filename: string): string | null {
+  const m = filename?.match(/p(\d+)/i);
+  return m ? `p${m[1]}` : null;
 }
 
-// ====== 匯入入口（CSV 純文字）==================================================
-// 注意：此簡易 CSV 解析器支援引號、逗點與跳脫 ""，一般情境足夠。
+export function matchPidByName(nameFromFile: string): string | null {
+  const key = sanitize(nameFromFile);
+  const hit = MOCK_PROPERTIES.find(p => sanitize(p.name) === key);
+  return hit ? hit.id : null;
+}
+
+// ---------- 解析/正規化 ----------
+function normUser(x: RawComment): string {
+  return (x.user ?? x.reviewer ?? x.author ?? x.name ?? '訪客').toString().trim() || '訪客';
+}
+
+function normText(x: RawComment): string {
+  return (x.text ?? x.content ?? x.comment ?? x.review ?? x.body ?? '').toString().trim();
+}
+
+function normRating(x: RawComment): number {
+  const raw = x.rating ?? x.score ?? x.stars ?? 0;
+  const num = typeof raw === 'string' ? parseFloat(raw) : Number(raw);
+  if (!isFinite(num)) return 3;
+  // 你的 UI 以整數星星顯示，這裡四捨五入到整數 1~5
+  return Math.min(5, Math.max(1, Math.round(num)));
+}
+
+function normCreatedAt(x: RawComment): number {
+  const raw = x.createdAt ?? x.date ?? x.review_date ?? x.time;
+  if (raw == null) return Date.now();
+  if (typeof raw === 'number') return raw;
+  const t = Date.parse(raw);
+  return isNaN(t) ? Date.now() : t;
+}
+
+function toComment(x: RawComment): Comment {
+  return {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+    user: normUser(x),
+    text: normText(x),
+    rating: normRating(x),
+    createdAt: normCreatedAt(x),
+  };
+}
+
+// 去重：用 user|text|rating 當 key
+function dedupe(list: Comment[]): Comment[] {
+  const seen = new Set<string>();
+  const out: Comment[] = [];
+  for (const c of list) {
+    const key = `${c.user}|${c.text}|${c.rating}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+// ---------- 匯入主流程（JSON 陣列） ----------
+export async function importCommentsFromJSON(
+  pid: string,
+  items: RawComment[],
+  opts: { merge?: boolean } = { merge: true }
+): Promise<number> {
+  if (!pid) throw new Error('未指定物件 pid');
+
+  const mapped = items
+    .map(toComment)
+    .filter(c => c.text.length > 0); // 只收有內容者
+
+  const key = commentsKey(pid);
+  const prev = await getJSON<Comment[]>(key, []);
+  const next = opts.merge ? dedupe([...mapped, ...prev]) : dedupe([...mapped]);
+
+  await setJSON(key, next);
+  await setAverageRatingFromComments(pid, next);
+  return next.length - prev.length; // 估算新增數
+}
+
+// ---------- 匯入主流程（CSV 文字） ----------
 export async function importCommentsFromCSV(
   pid: string,
   csv: string,
-  opts?: { dedupe?: boolean; merge?: boolean }
+  opts: { merge?: boolean } = { merge: true }
 ): Promise<number> {
-  const rows = parseCSV(csv.trim());
-  return importCommentsFromJSON(pid, rows as RawComment[], opts);
+  // 動態 require，避免沒裝也能編譯
+  // 需要：npm i papaparse
+  // @ts-ignore
+  const Papa = require('papaparse');
+  const res = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true });
+  const rows: RawComment[] = res.data;
+  return importCommentsFromJSON(pid, rows, opts);
 }
 
-// ====== 工具：正規化 RawComment -> Comment ====================================
-function normalize(r: RawComment, pid: string, idx: number): Comment {
-  const user =
-    (r.user ?? r.reviewer ?? r.author ?? '匿名').toString().trim() || '匿名';
-  const text = (r.text ?? r.content ?? r.comment ?? '').toString().trim();
+// ---------- 從檔名或資料猜 pid ----------
+export function resolvePidForFile(
+  filename: string,
+  firstRow?: RawComment
+): string | null {
+  // 1) 檔名帶 pX
+  const byFile = inferPidFromFilename(filename);
+  if (byFile) return byFile;
 
-  // rating 轉數字並夾在 1~5
-  let rating = Number(r.rating ?? 0);
-  if (!Number.isFinite(rating)) rating = 0;
-  rating = Math.max(1, Math.min(5, rating || 0));
+  // 2) row 自帶 propertyId/pid
+  const byRow = firstRow?.propertyId ?? firstRow?.pid;
+  if (typeof byRow === 'string' && byRow.trim()) return byRow.trim();
 
-  const createdAt = resolveCreatedAt(r);
+  // 3) 檔名就是物件名稱
+  const base = filename.replace(/\.[^.]+$/, ''); // 去副檔名
+  const byName = matchPidByName(base);
+  if (byName) return byName;
 
-  return {
-    id: `imp:${pid}:${createdAt}:${idx}`,
-    user,
-    rating,
-    text,
-    createdAt,
-  };
-}
-
-function resolveCreatedAt(r: RawComment): number {
-  // 1) 優先 epoch number
-  const n = Number(r.createdAt);
-  if (Number.isFinite(n) && n > 0) return n;
-
-  // 2) 明確日期字串
-  const ds =
-    (r.createdAt as string) ||
-    r.date ||
-    r.review_date ||
-    undefined;
-  if (ds) {
-    const t = Date.parse(ds);
-    if (!Number.isNaN(t)) return t;
-  }
-
-  // 3) 相對時間（例如「3 個月前」）
-  const rel = r.review_time;
-  if (rel) return parseRelativeTime(rel);
-
-  // 4) 失敗就用現在
-  return Date.now();
-}
-
-// 解析「X 個月/天/年 前」→ 粗略時間戳
-function parseRelativeTime(s: string): number {
-  const now = Date.now();
-  const m = s.match(/(\d+)\s*(秒|分鐘|小時|天|週|月|年)/);
-  if (!m) return now;
-  const n = parseInt(m[1], 10);
-  const unit = m[2] as '秒' | '分鐘' | '小時' | '天' | '週' | '月' | '年';
-  const ms: Record<typeof unit, number> = {
-    秒: 1_000,
-    分鐘: 60_000,
-    小時: 3_600_000,
-    天: 86_400_000,
-    週: 604_800_000,
-    月: 2_592_000_000,
-    年: 31_536_000_000,
-  };
-  return now - (ms[unit] ?? 0) * n;
-}
-
-// ====== 簡易 CSV 解析器 ========================================================
-// 回傳：每列一個物件（用第一列做 header）
-function parseCSV(text: string): Record<string, string>[] {
-  if (!text) return [];
-  const lines = text.replace(/\r\n/g, '\n').split('\n').filter(Boolean);
-  if (!lines.length) return [];
-
-  const headers = splitCSVLine(lines[0]).map((h) => h.trim());
-  const rows: Record<string, string>[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    if (cols.length === 1 && cols[0] === '') continue; // 空行
-    const obj: Record<string, string> = {};
-    headers.forEach((h, idx) => {
-      obj[h] = (cols[idx] ?? '').trim();
-    });
-    rows.push(obj);
-  }
-  return rows;
-}
-
-// 支援引號、逗點、跳脫 ""
-function splitCSVLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        // 轉義雙引號
-        cur += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (ch === ',' && !inQuotes) {
-      out.push(cur);
-      cur = '';
-      continue;
-    }
-
-    cur += ch!;
-  }
-  out.push(cur);
-  return out;
+  return null;
 }

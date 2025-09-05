@@ -19,27 +19,20 @@ import {
   getCurrentUser,
   isAdmin,
   register,
-  resetPassword, // resetPassword(email, otp, newPassword)
+  resetPassword, // resetPasswordWithOtp(email, otp, newPassword)
   sendResetOtp,
   signIn,
   signOut,
   type AuthUser,
 } from '../lib/auth';
 
-// ← 新增：載入要匯入的 JSON（放對路徑見下方注意事項）
-import rawP2 from '../data/import/comments_p2.json';
-import { importGoogleJson } from '../lib/comments';
-
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 type Mode = 'login' | 'signup' | 'reset';
-
-// 冷卻秒數（可改 30～90）
 const RESEND_COOLDOWN = 60;
 
 export default function LoginScreen() {
   const router = useRouter();
 
-  // session / mode
   const [user, setUser] = useState<AuthUser | null>(null);
   const [mode, setMode] = useState<Mode>('login');
 
@@ -57,11 +50,11 @@ export default function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const [showPwd, setShowPwd] = useState(false);
 
-  // 驗證碼寄送冷卻
+  // cooldown
   const [cooldown, setCooldown] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // touched for inline errors
+  // touched
   const [emailTouched, setEmailTouched] = useState(false);
   const [pwdTouched, setPwdTouched] = useState(false);
   const [pwd2Touched, setPwd2Touched] = useState(false);
@@ -71,7 +64,6 @@ export default function LoginScreen() {
 
   useEffect(() => { getCurrentUser().then(setUser); }, []);
 
-  // 切換模式時，若離開 reset 就清掉倒數
   useEffect(() => {
     if (mode !== 'reset') {
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
@@ -80,29 +72,21 @@ export default function LoginScreen() {
     }
   }, [mode]);
 
-  // 組件卸載時也清一次
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, []);
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
-  // validations
   const emailValid   = useMemo(() => emailRegex.test(email.trim()), [email]);
   const pwdValid     = useMemo(() => pwd.length >= 6, [pwd]);
   const pwd2Valid    = useMemo(() => (mode === 'login') ? true : (pwd2.length >= 6 && pwd2 === pwd), [pwd2, pwd, mode]);
 
-  const otpValid     = useMemo(() => otp.trim().length >= 4, [otp]); // 4~6 皆可
+  const otpValid     = useMemo(() => otp.trim().length >= 4, [otp]);
   const newPwdValid  = useMemo(() => newPwd.length >= 6, [newPwd]);
   const newPwd2Valid = useMemo(() => newPwd2.length >= 6 && newPwd2 === newPwd, [newPwd2, newPwd]);
 
   const canSubmit = useMemo(() => {
     if (busy) return false;
     if (!emailValid) return false;
-
-    if (mode === 'login')   return pwdValid;
-    if (mode === 'signup')  return pwdValid && pwd2Valid;
-    // reset: 需要 OTP + 新密碼兩次
+    if (mode === 'login')  return pwdValid;
+    if (mode === 'signup') return pwdValid && pwd2Valid;
     return otpValid && newPwdValid && newPwd2Valid;
   }, [busy, emailValid, pwdValid, pwd2Valid, mode, otpValid, newPwdValid, newPwd2Valid]);
 
@@ -113,22 +97,17 @@ export default function LoginScreen() {
     setOtpTouched(false); setNewPwdTouched(false); setNewPwd2Touched(false);
   };
 
-  // ===== helpers =====
   const startCooldown = (sec: number) => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     setCooldown(sec);
     timerRef.current = setInterval(() => {
-      setCooldown((s) => {
-        if (s <= 1) {
-          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-          return 0;
-        }
+      setCooldown(s => {
+        if (s <= 1) { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; } return 0; }
         return s - 1;
       });
     }, 1000);
   };
 
-  // ===== actions =====
   const handleLogin = async () => {
     try {
       setBusy(true);
@@ -137,9 +116,7 @@ export default function LoginScreen() {
       Alert.alert('登入成功', isAdmin(u) ? '你是管理員' : '一般使用者');
     } catch (e: any) {
       Alert.alert('登入失敗', e?.message ?? '請稍後再試');
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
   const handleSignup = async () => {
@@ -155,29 +132,22 @@ export default function LoginScreen() {
       setMode('login');
     } catch (e: any) {
       Alert.alert('註冊失敗', e?.message ?? '請稍後再試');
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
-  // Step 1: 寄送 OTP（套用冷卻）
   const handleSendOtp = async () => {
     try {
       if (!emailValid) return Alert.alert('Email 格式不正確');
-      if (cooldown > 0) return; // 還在冷卻中
-
+      if (cooldown > 0) return;
       setBusy(true);
       await sendResetOtp(email.trim());
       Alert.alert('驗證碼已寄出', '請至信箱查收 6 位數驗證碼');
       startCooldown(RESEND_COOLDOWN);
     } catch (e: any) {
       Alert.alert('寄送失敗', e?.message ?? '請稍後再試');
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
-  // Step 2: 使用 OTP 重設本機密碼（Demo）
   const handleDoReset = async () => {
     try {
       if (!emailValid)   return Alert.alert('Email 格式不正確');
@@ -190,14 +160,11 @@ export default function LoginScreen() {
       Alert.alert('已重設密碼', '請用新密碼登入');
       setMode('login');
       clearAll();
-      // 重設成功後結束冷卻
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       setCooldown(0);
     } catch (e: any) {
       Alert.alert('重設失敗', e?.message ?? '請稍後再試');
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
   const handleLogout = async () => {
@@ -226,7 +193,6 @@ export default function LoginScreen() {
     return handleDoReset();
   };
 
-  // ===== UI =====
   return (
     <SafeAreaView style={{ flex: 1 }}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.select({ ios: 'padding', android: undefined })}>
@@ -238,20 +204,10 @@ export default function LoginScreen() {
               <Text style={styles.row}>目前帳號：{user.email}</Text>
               <Text style={styles.row}>身分：{isAdmin(user) ? '管理員' : '一般使用者'}</Text>
 
-              {/* 管理員專用：匯入 Google 評論（p2：元智大富翁） */}
+              {/* 只有管理員看到匯入工具 */}
               {isAdmin(user) && (
-                <Pressable
-                  style={[styles.btn, { backgroundColor: '#10b981' }]}
-                  onPress={async () => {
-                    try {
-                      const res = await importGoogleJson('p2', rawP2 as any[]);
-                      Alert.alert('匯入完成', `新增 ${res.added} 筆，總筆數：${res.total}`);
-                    } catch (e: any) {
-                      Alert.alert('匯入失敗', e?.message ?? '請稍後再試');
-                    }
-                  }}
-                >
-                  <Text style={styles.btnText}>匯入「元智大富翁」Google評論</Text>
+                <Pressable style={[styles.btn, { backgroundColor: '#10b981' }]} onPress={() => router.push('../admin/import')}>
+                  <Text style={styles.btnText}>開啟匯入工具</Text>
                 </Pressable>
               )}
 
@@ -261,7 +217,6 @@ export default function LoginScreen() {
             </View>
           ) : (
             <View style={styles.card}>
-              {/* 模式切換 */}
               <View style={styles.modeRow}>
                 <Pressable style={[styles.modeBtn, mode === 'login' && styles.modeBtnActive]} onPress={() => { setMode('login'); clearAll(); }}>
                   <Text style={[styles.modeText, mode === 'login' && styles.modeTextActive]}>登入</Text>
@@ -420,33 +375,23 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2,
     gap: 10,
   },
-
   modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
   modeBtn: { flex: 1, paddingVertical: 8, borderRadius: 10, backgroundColor: '#f1f5f9', alignItems: 'center' },
   modeBtnActive: { backgroundColor: '#2f80ed' },
   modeText: { fontWeight: '700', color: '#111' },
   modeTextActive: { color: '#fff' },
-
   label: { fontWeight: '700', marginTop: 6 },
   input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#fafafa' },
   inputError: { borderColor: '#ef4444', backgroundColor: '#fff5f5' },
   errorText: { color: '#ef4444', fontSize: 12, marginTop: 4 },
-
   pwdRow: { position: 'relative', flexDirection: 'row', alignItems: 'center' },
-  eyeBtn: {
-    position: 'absolute', right: 10, height: 44, width: 44,
-    alignItems: 'center', justifyContent: 'center',
-  },
-
+  eyeBtn: { position: 'absolute', right: 10, height: 44, width: 44, alignItems: 'center', justifyContent: 'center' },
   btn: { marginTop: 12, backgroundColor: '#2f80ed', paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
   btnText: { color: 'white', fontWeight: '800' },
-
   smallBtn: { paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#2f80ed', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   smallBtnText: { color: '#fff', fontWeight: '800' },
-
   row: { marginBottom: 4 },
   hint: { color: '#666', fontSize: 12, marginTop: 8 },
-
   linkBtn: { alignSelf: 'center', marginTop: 12 },
   linkText: { color: '#2f80ed', fontWeight: '700' },
 });
