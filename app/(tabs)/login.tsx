@@ -1,7 +1,7 @@
 // app/(tabs)/login.tsx
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -19,20 +19,23 @@ import {
   getCurrentUser,
   isAdmin,
   register,
-  resetPassword,
+  resetPassword, // ← resetPasswordWithOtp(email, otp, newPassword)
   sendResetOtp,
   signIn,
-  signOut, // ← 這是 resetPasswordWithOtp 的別名（需要 3 參數）
+  signOut,
   type AuthUser,
 } from '../lib/auth';
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 type Mode = 'login' | 'signup' | 'reset';
 
+// 冷卻秒數（可改 30～90）
+const RESEND_COOLDOWN = 60;
+
 export default function LoginScreen() {
   const router = useRouter();
 
-  // session
+  // session / mode
   const [user, setUser] = useState<AuthUser | null>(null);
   const [mode, setMode] = useState<Mode>('login');
 
@@ -50,6 +53,10 @@ export default function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const [showPwd, setShowPwd] = useState(false);
 
+  // 驗證碼寄送冷卻
+  const [cooldown, setCooldown] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // touched for inline errors
   const [emailTouched, setEmailTouched] = useState(false);
   const [pwdTouched, setPwdTouched] = useState(false);
@@ -60,12 +67,28 @@ export default function LoginScreen() {
 
   useEffect(() => { getCurrentUser().then(setUser); }, []);
 
+  // 切換模式時，若離開 reset 就清掉倒數
+  useEffect(() => {
+    if (mode !== 'reset') {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      setCooldown(0);
+      setOtp('');
+    }
+  }, [mode]);
+
+  // 組件卸載時也清一次
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
   // validations
   const emailValid   = useMemo(() => emailRegex.test(email.trim()), [email]);
   const pwdValid     = useMemo(() => pwd.length >= 6, [pwd]);
   const pwd2Valid    = useMemo(() => (mode === 'login') ? true : (pwd2.length >= 6 && pwd2 === pwd), [pwd2, pwd, mode]);
 
-  const otpValid     = useMemo(() => otp.trim().length >= 4, [otp]);
+  const otpValid     = useMemo(() => otp.trim().length >= 4, [otp]); // 4~6 皆可
   const newPwdValid  = useMemo(() => newPwd.length >= 6, [newPwd]);
   const newPwd2Valid = useMemo(() => newPwd2.length >= 6 && newPwd2 === newPwd, [newPwd2, newPwd]);
 
@@ -90,7 +113,22 @@ export default function LoginScreen() {
     setOtpTouched(false); setNewPwdTouched(false); setNewPwd2Touched(false);
   };
 
-  // -------- actions --------
+  // ===== helpers =====
+  const startCooldown = (sec: number) => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    setCooldown(sec);
+    timerRef.current = setInterval(() => {
+      setCooldown((s) => {
+        if (s <= 1) {
+          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+  };
+
+  // ===== actions =====
   const handleLogin = async () => {
     try {
       setBusy(true);
@@ -122,16 +160,16 @@ export default function LoginScreen() {
     }
   };
 
-  // Step 1: 寄送 OTP
+  // Step 1: 寄送 OTP（套用冷卻）
   const handleSendOtp = async () => {
     try {
-      if (!emailValid) {
-        Alert.alert('Email 格式不正確');
-        return;
-      }
+      if (!emailValid) return Alert.alert('Email 格式不正確');
+      if (cooldown > 0) return; // 還在冷卻中
+
       setBusy(true);
       await sendResetOtp(email.trim());
       Alert.alert('驗證碼已寄出', '請至信箱查收 6 位數驗證碼');
+      startCooldown(RESEND_COOLDOWN);
     } catch (e: any) {
       Alert.alert('寄送失敗', e?.message ?? '請稍後再試');
     } finally {
@@ -152,6 +190,9 @@ export default function LoginScreen() {
       Alert.alert('已重設密碼', '請用新密碼登入');
       setMode('login');
       clearAll();
+      // 重設成功後結束冷卻
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      setCooldown(0);
     } catch (e: any) {
       Alert.alert('重設失敗', e?.message ?? '請稍後再試');
     } finally {
@@ -163,6 +204,8 @@ export default function LoginScreen() {
     await signOut();
     setUser(null);
     clearAll();
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    setCooldown(0);
     Alert.alert('已登出');
   };
 
@@ -183,7 +226,7 @@ export default function LoginScreen() {
     return handleDoReset();
   };
 
-  // -------- UI --------
+  // ===== UI =====
   return (
     <SafeAreaView style={{ flex: 1 }}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.select({ ios: 'padding', android: undefined })}>
@@ -271,7 +314,7 @@ export default function LoginScreen() {
                 </>
               )}
 
-              {/* 忘記密碼：OTP + 新密碼 */}
+              {/* 忘記密碼：OTP + 新密碼 + 冷卻重寄 */}
               {mode === 'reset' && (
                 <>
                   <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
@@ -290,8 +333,17 @@ export default function LoginScreen() {
                         <Text style={styles.errorText}>請輸入 4~6 位數驗證碼</Text>
                       )}
                     </View>
-                    <Pressable disabled={busy || !emailValid} style={[styles.smallBtn, (!emailValid || busy) && { opacity: 0.6 }]} onPress={handleSendOtp}>
-                      <Text style={styles.smallBtnText}>{busy ? '寄送中…' : '寄送驗證碼'}</Text>
+                    <Pressable
+                      disabled={busy || !emailValid || cooldown > 0}
+                      style={[
+                        styles.smallBtn,
+                        (busy || !emailValid || cooldown > 0) && { opacity: 0.6 },
+                      ]}
+                      onPress={handleSendOtp}
+                    >
+                      <Text style={styles.smallBtnText}>
+                        {cooldown > 0 ? `重寄(${cooldown}s)` : busy ? '寄送中…' : '寄送驗證碼'}
+                      </Text>
                     </Pressable>
                   </View>
 
@@ -330,7 +382,7 @@ export default function LoginScreen() {
               </Pressable>
 
               <Text style={styles.hint}>
-                * Demo：帳號資料僅儲存在此裝置（本機）。忘記密碼採用雲端 OTP 驗證，但僅更新本機密碼。正式上線請改完整後端方案。
+                * Demo：帳號資料僅儲存在此裝置（本機）。忘記密碼採用雲端 OTP 驗證（可設定到期時間與長度），但僅更新本機密碼。
               </Text>
             </View>
           )}
